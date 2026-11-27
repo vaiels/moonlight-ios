@@ -43,6 +43,16 @@ static OPUS_MULTISTREAM_CONFIGURATION audioConfig;
 static void* audioBuffer;
 static int audioFrameSize;
 
+// Audio jitter buffer. Wi-Fi delivers audio in bursts with short stalls in between.
+// Playing each packet the moment it arrives (and dropping anything over 30 ms) turns
+// every stall into an audible hole and every burst into skipped audio. Instead, hold
+// AUDIO_TARGET_MS of audio before playback starts, refill after an underrun, and only
+// drop packets once more than AUDIO_MAX_MS is waiting (to keep latency bounded).
+#define AUDIO_TARGET_MS 60
+#define AUDIO_MAX_MS 150
+static int audioBytesPerMs;
+static bool audioPrimed;
+
 static VideoDecoderRenderer* renderer;
 
 int DrDecoderSetup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags)
@@ -232,6 +242,8 @@ int ArInit(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opusConfig, v
     
     audioConfig = *opusConfig;
     audioFrameSize = opusConfig->samplesPerFrame * sizeof(short) * opusConfig->channelCount;
+    audioBytesPerMs = (opusConfig->sampleRate / 1000) * (int)sizeof(short) * opusConfig->channelCount;
+    audioPrimed = false;
     audioBuffer = SDL_malloc(audioFrameSize);
     if (audioBuffer == NULL) {
         Log(LOG_E, @"Failed to allocate audio frame buffer");
@@ -251,9 +263,9 @@ int ArInit(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opusConfig, v
         return -1;
     }
     
-    // Start playback
-    SDL_PauseAudioDevice(audioDevice, 0);
-    
+    // Playback starts (unpauses) in ArDecodeAndPlaySample once the jitter buffer is filled
+    SDL_PauseAudioDevice(audioDevice, 1);
+
     // Disable lowering volume of other audio streams (SDL sets AVAudioSessionCategoryOptionDuckOthers by default)
     [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
     
@@ -283,26 +295,33 @@ void ArCleanup(void)
 void ArDecodeAndPlaySample(char* sampleData, int sampleLength)
 {
     int decodeLen;
-    
-    // Don't queue if there's already more than 30 ms of audio data waiting
-    // in Moonlight's audio queue.
-    if (LiGetPendingAudioDuration() > 30) {
+
+    int queuedMs = (int)(SDL_GetQueuedAudioSize(audioDevice) / audioBytesPerMs);
+
+    // Keep latency bounded: drop audio only when far more than the target is waiting
+    if (queuedMs + LiGetPendingAudioDuration() > AUDIO_MAX_MS) {
         return;
     }
-    
+
+    // The device played everything we had: refill the buffer before resuming,
+    // instead of stuttering through a run of tiny gaps.
+    if (audioPrimed && queuedMs == 0) {
+        SDL_PauseAudioDevice(audioDevice, 1);
+        audioPrimed = false;
+    }
+
     decodeLen = opus_multistream_decode(opusDecoder, (unsigned char *)sampleData, sampleLength,
                                         (short*)audioBuffer, audioConfig.samplesPerFrame, 0);
     if (decodeLen > 0) {
-        // Provide backpressure on the queue to ensure too many frames don't build up
-        // in SDL's audio queue.
-        while (SDL_GetQueuedAudioSize(audioDevice) / audioFrameSize > 10) {
-            SDL_Delay(1);
-        }
-        
         if (SDL_QueueAudio(audioDevice,
                            audioBuffer,
                            sizeof(short) * decodeLen * audioConfig.channelCount) < 0) {
             Log(LOG_E, @"Failed to queue audio sample: %s\n", SDL_GetError());
+        }
+
+        if (!audioPrimed && SDL_GetQueuedAudioSize(audioDevice) / audioBytesPerMs >= AUDIO_TARGET_MS) {
+            SDL_PauseAudioDevice(audioDevice, 0);
+            audioPrimed = true;
         }
     }
 }
