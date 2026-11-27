@@ -23,6 +23,16 @@ jobs:
       - name: Xcode version
         run: xcodebuild -version
 
+      # moonlight-common-c switched the audio FEC queue to microseconds but left
+      # AudioPacketDuration (milliseconds) unconverted, so after any out-of-order
+      # packet a late audio block is abandoned after ~10 ms instead of ~30 ms.
+      # On Wi-Fi that drops whole 20 ms blocks: choppy audio with clean video.
+      - name: Patch audio FEC wait time (ms vs us)
+        run: |
+          F=moonlight-common/moonlight-common-c/src/RtpAudioQueue.c
+          sed -i '' 's/(uint64_t)(AudioPacketDuration \* RTPA_DATA_SHARDS) + (RTPQ_OOS_WAIT_TIME_MS \* 1000)/((uint64_t)AudioPacketDuration * RTPA_DATA_SHARDS * 1000) + (RTPQ_OOS_WAIT_TIME_MS * 1000)/' "$F"
+          grep -n 'AudioPacketDuration \* RTPA_DATA_SHARDS \* 1000' "$F"
+
       - name: Build for iOS devices (no code signing)
         run: |
           xcodebuild -project Moonlight.xcodeproj -scheme Moonlight \
