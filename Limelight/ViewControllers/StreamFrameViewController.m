@@ -202,7 +202,8 @@ static const CGFloat MIN_EXIT_SWIPE_DISTANCE = 100;
     if (_settings.absoluteTouchMode) {
         _scrollView = [[UIScrollView alloc] initWithFrame:self.view.frame];
 #if !TARGET_OS_TV
-        [_scrollView.panGestureRecognizer setMinimumNumberOfTouches:2];
+        // Two fingers scroll the host (see StreamView). Three fingers pan the zoomed view.
+        [_scrollView.panGestureRecognizer setMinimumNumberOfTouches:3];
 #endif
         [_scrollView setShowsHorizontalScrollIndicator:NO];
         [_scrollView setShowsVerticalScrollIndicator:NO];
